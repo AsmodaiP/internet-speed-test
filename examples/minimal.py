@@ -8,9 +8,9 @@ Usage:
     python examples/minimal.py https://example.com/large-image.jpg
 """
 
+import http.client
 import sys
 import time
-import urllib.error
 import urllib.request
 
 REQUESTS = 10
@@ -42,7 +42,7 @@ def main() -> None:
     for i in range(1, REQUESTS + 1):  # strictly one after another
         try:
             elapsed, received = download(url)
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except (OSError, http.client.HTTPException, ValueError) as exc:
             sys.exit(f"request {i} failed: {exc}")
         durations.append(elapsed)
         total_bytes += received

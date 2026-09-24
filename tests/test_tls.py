@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from netmeter.cli import main
 from netmeter.download import Downloader, DownloadError
 from tests.conftest import LocalServer
 
@@ -22,7 +23,8 @@ def tls_server(tmp_path: Path) -> Iterator[LocalServer]:
     key, cert = tmp_path / "key.pem", tmp_path / "cert.pem"
     subprocess.run(
         [
-            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+            "openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+            "-nodes", "-days", "1",
             "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
             "-keyout", str(key), "-out", str(cert),
         ],
@@ -57,4 +59,13 @@ def test_insecure_mode_skips_verification(tls_server) -> None:
         first = d.download(tls_server.url("/file?size=10"))
         second = d.download(tls_server.url("/file?size=20"))
     assert (first.downloaded_bytes, second.downloaded_bytes) == (10, 20)
-    assert len({r.client_port for r in tls_server.records}) == 1  # keep-alive works over TLS
+    ports = [r.client_port for r in tls_server.records]
+    assert len(ports) == 2 and len(set(ports)) == 1  # keep-alive works over TLS
+
+
+def test_cli_insecure_flag(tls_server, capsys) -> None:
+    assert main([tls_server.url("/file?size=10"), "-n", "1", "-q"]) == 1
+    err = capsys.readouterr().err
+    assert "TLS certificate verification failed" in err
+    assert "hint:" not in err  # a self-signed cert is not a missing CA bundle
+    assert main([tls_server.url("/file?size=10"), "-n", "1", "-q", "--insecure"]) == 0

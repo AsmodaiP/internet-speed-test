@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 import sys
 from collections.abc import Sequence
 from typing import Any, TextIO
+from urllib.parse import urlsplit
 
 from netmeter import __version__
 from netmeter.download import DEFAULT_TIMEOUT
@@ -65,8 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if "://" not in args.url:
-        parser.error("URL must start with http:// or https://")
+    parts = urlsplit(args.url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        parser.error("URL must look like http://host/path or https://host/path")
 
     # In JSON mode stdout carries only the report, so progress goes to stderr.
     progress: TextIO = sys.stderr if args.json else sys.stdout
@@ -89,11 +92,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             outcomes.append(outcome)
             if not args.quiet:
                 print(_format_outcome(outcome, args.requests), file=progress, flush=True)
+            elif isinstance(outcome, RequestFailure):  # quiet still tells you what went wrong
+                print(_format_outcome(outcome, args.requests), file=sys.stderr, flush=True)
     except KeyboardInterrupt:
         interrupted = True
         print("\nInterrupted, summarizing what was measured so far", file=sys.stderr)
 
-    _print_warnings(outcomes)
+    _print_hints(outcomes)
 
     summary = _try_summarize(outcomes)
     if args.json:
@@ -147,23 +152,16 @@ def _format_summary(s: Summary) -> str:
     return "\n".join(lines)
 
 
-def _print_warnings(outcomes: Sequence[RequestResult | RequestFailure]) -> None:
+def _print_hints(outcomes: Sequence[RequestResult | RequestFailure]) -> None:
     for outcome in outcomes:
-        if isinstance(outcome, RequestFailure) and "TLS certificate verification" in outcome.error:
+        if isinstance(outcome, RequestFailure) and "local issuer certificate" in outcome.error:
             print(
                 "hint: your Python cannot find a CA bundle. Install certificates for it "
                 "(on macOS: 'Install Certificates.command' in the Python folder, or "
                 "'pip install certifi'), or pass --insecure to skip verification.",
                 file=sys.stderr,
             )
-            break
-    for outcome in outcomes:
-        if isinstance(outcome, RequestResult) and outcome.content_length_mismatch:
-            print(
-                f"warning: request {outcome.index} received {outcome.downloaded_bytes} bytes "
-                f"but the server announced Content-Length {outcome.content_length}",
-                file=sys.stderr,
-            )
+            return
 
 
 def _try_summarize(outcomes: Sequence[RequestResult | RequestFailure]) -> Summary | None:
@@ -193,7 +191,7 @@ def _json_report(
                     "index": outcome.index,
                     "ok": True,
                     "duration_s": outcome.duration,
-                    "time_to_first_byte_s": outcome.time_to_first_byte,
+                    "time_to_headers_s": outcome.time_to_headers,
                     "downloaded_bytes": outcome.downloaded_bytes,
                     "content_length": outcome.content_length,
                     "bytes_per_second": outcome.bytes_per_second,
@@ -220,8 +218,8 @@ def _positive_int(value: str) -> int:
 
 def _positive_float(value: str) -> float:
     number = float(value)
-    if number <= 0:
-        raise argparse.ArgumentTypeError("must be greater than 0")
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("must be a finite number greater than 0")
     return number
 
 

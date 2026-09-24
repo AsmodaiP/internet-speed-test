@@ -4,7 +4,7 @@ A small internet speed meter: download a URL several times in a row from your
 machine and report the average request time, the downloaded volume and the
 speed in MB/s.
 
-Standard library only, Python 3.11+. No third-party runtime dependencies.
+Standard library only, Python 3.10+. No third-party runtime dependencies.
 
 [![CI](https://github.com/AsmodaiP/internet-speed-test/actions/workflows/ci.yml/badge.svg)](https://github.com/AsmodaiP/internet-speed-test/actions/workflows/ci.yml)
 
@@ -23,8 +23,10 @@ The repository has two layers:
 - [`src/netmeter/`](src/netmeter/) is the same measurement packaged as a proper
   CLI tool with options, error handling, JSON output and tests.
 
-Both do exactly the same thing by default: 10 sequential GET requests, a new
-connection for each, and the same arithmetic.
+Both measure the same thing the same way by default: 10 sequential GET
+requests, a new connection for each, the same arithmetic. The differences are
+in what happens when things go wrong: the minimal script stops at the first
+error, the CLI has the failure policy described under *Error handling*.
 
 ## Quick start
 
@@ -36,13 +38,13 @@ cd internet-speed-test
 Minimal script, nothing to install:
 
 ```bash
-python3 examples/minimal.py https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg
+python3 examples/minimal.py "https://speed.cloudflare.com/__down?bytes=25000000"
 ```
 
 Full CLI, still nothing to install:
 
 ```bash
-PYTHONPATH=src python3 -m netmeter https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg
+PYTHONPATH=src python3 -m netmeter "https://speed.cloudflare.com/__down?bytes=25000000"
 ```
 
 Or install it (with [uv](https://docs.astral.sh/uv/) or plain pip) to get the
@@ -50,14 +52,21 @@ Or install it (with [uv](https://docs.astral.sh/uv/) or plain pip) to get the
 
 ```bash
 uv venv && uv pip install -e .        # or: python3 -m venv .venv && .venv/bin/pip install -e .
-uv run netmeter https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg
+uv run netmeter "https://speed.cloudflare.com/__down?bytes=25000000"
 ```
 
-Any URL that returns a sizeable body works. Two that are known to be fine with
-repeated downloads:
+Any `http://` or `https://` URL that returns a sizeable body works. Two that
+are known to be fine with repeated downloads:
 
-- `https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg` (14.7 MB JPEG)
-- `https://speed.cloudflare.com/__down?bytes=25000000` (25 MB of zeros, any size you like)
+- `https://speed.cloudflare.com/__down?bytes=25000000` (25 MB of zeros; change the number for any size)
+- `https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg` (14.7 MB JPEG; Wikimedia rate-limits after a few dozen downloads)
+
+> **macOS note.** If the first request fails with
+> `CERTIFICATE_VERIFY_FAILED` / `unable to get local issuer certificate`, your
+> Python has no CA bundle. That is the python.org installer's default; run
+> `Install Certificates.command` from its folder once, or use a Homebrew
+> Python. The `netmeter` CLI also accepts `--insecure` and picks up `certifi`
+> if it is installed; the minimal script deliberately has neither.
 
 ## Example output
 
@@ -120,9 +129,9 @@ Speed:                3.63 MB/s
 The request time therefore includes everything a client has to wait for to get
 the resource: DNS lookup, TCP connect, TLS handshake, server processing and the
 transfer itself. That is what "how long does it take to download this" means
-from the application's point of view. Time to first byte is recorded
-separately and available in the JSON output if you want to separate latency
-from transfer.
+from the application's point of view. The time until the response headers
+arrived is recorded separately (`time_to_headers_s` in the JSON output) if you
+want to separate latency from transfer.
 
 ## How speed is calculated
 
@@ -163,8 +172,8 @@ netmeter URL [-n N] [--timeout SECONDS] [--keep-alive] [--insecure] [--json] [-q
 | `-q`, `--quiet` | off | Print only the summary. |
 
 Exit code is 0 when every request succeeded, 1 when any failed, 2 for invalid
-arguments, 130 on Ctrl-C (a summary of the requests completed so far is still
-printed).
+arguments (bad URL, `-n 0`, negative timeout), 130 on Ctrl-C (a summary of the
+requests completed so far is still printed).
 
 `python -m netmeter` behaves the same as `netmeter`.
 
@@ -175,20 +184,27 @@ printed).
 - Network errors (DNS, refused connection, TLS, timeout, connection dropped
   mid-body) are reported in plain words, e.g.
   `FAILED after 0.047 s: HTTP 404 Not Found` or
-  `timed out after 30 s without receiving data`.
+  `timed out after 30 s without receiving data`. Failures are printed even
+  with `--quiet`.
+- A body shorter than the announced `Content-Length` is a failure
+  (`server closed the connection after 400 of 1000 bytes`), not a fast
+  success. The bytes that did arrive are not counted towards the speed.
 - If the **first** request fails the run stops immediately: that almost always
   means a wrong URL, and repeating it nine more times just wastes time.
   A failure **later** in the run is recorded, the run continues, and the summary
   says `9/10 successful` and averages over the nine. Exit code is 1 either way.
-- There are no automatic retries. A retry would hide exactly the thing a speed
-  meter should show.
-- If the server announces a `Content-Length` that differs from what actually
-  arrived, the tool warns about it but reports the bytes it really received.
+- There are no automatic retries of a measurement. A retry would hide exactly
+  the thing a speed meter should show. The one exception is in `--keep-alive`
+  mode: if the server silently closed an idle connection, the request is sent
+  again on a new one, because nothing had been transferred yet. That is how
+  every pooled HTTP client behaves.
 - TLS: if you see `TLS certificate verification failed: unable to get local
   issuer certificate`, your Python has no CA bundle. This is common with the
   python.org installer on macOS (run `Install Certificates.command` from the
   Python folder, or `pip install certifi`, which netmeter picks up
   automatically). `--insecure` skips verification if you just want the number.
+  A different message (`self-signed certificate`, `hostname mismatch`) means
+  the server's certificate is the problem, not your Python.
 - Some CDNs reject Python's default `User-Agent` (Wikimedia answers 403), and
   most rate-limit after a few dozen downloads of the same file (Wikimedia
   answers 429). netmeter sends its own descriptive User-Agent; if you get
@@ -217,6 +233,9 @@ Other things worth knowing when reading the numbers:
 - `Accept-Encoding: identity` is sent so the server does not compress the
   body. The bytes counted are the bytes that crossed the wire, not the
   decompressed size.
+- If the server answers with HTTP/1.0 or `Connection: close`, `--keep-alive`
+  cannot actually reuse the connection and silently degrades to one
+  connection per request.
 - The first request to a CDN may be served from the origin and the rest from
   an edge cache, which can make request 1 an outlier.
 - A single TCP connection ramps up (slow start); short downloads never reach
@@ -230,25 +249,29 @@ uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
 
-The tests spin up a local HTTP (and HTTPS) server and never touch the
-internet. They cover:
+The tests spin up a local HTTP (and HTTPS, with a throwaway self-signed
+certificate) server. No test makes an HTTP request to the internet; the one
+that checks DNS failure reporting resolves a name under the reserved
+`.invalid` domain. They cover:
 
 - the arithmetic: average time, total bytes, `total/total` throughput versus
   the mean of speeds, min/median/max, decimal unit conversions, empty run,
   zero duration;
 - the downloader: real byte counting, chunked bodies without `Content-Length`,
-  truncated bodies, redirects (including loops and missing `Location`),
-  HTTP 4xx/5xx, timeouts, refused connections, DNS failures, malformed URLs,
-  `Accept-Encoding: identity`, new-connection-per-request vs keep-alive
-  (checked by counting distinct client ports on the server side), TLS
-  verification and `--insecure`;
+  truncated bodies (plain and chunked), redirects (including loops and missing
+  `Location`), non-2xx statuses, inactivity timeout that does not fire on a
+  slow-but-flowing body, refused connections, DNS failures, malformed and
+  non-ASCII URLs, `Accept-Encoding: identity`, new-connection-per-request vs
+  keep-alive (checked by counting distinct client ports on the server side),
+  keep-alive recovery after the server drops an idle connection and after a
+  timeout, TLS verification and `--insecure`;
 - the runner: exactly N requests, **requests never overlap** (the server
   delays every response, so sequential requests must start at least that far
   apart), stop on first failure, continue on later failure;
-- the CLI: human output, `--quiet`, `--json` on a clean stdout, exit codes,
-  `Content-Length` warning, argument validation.
+- the CLI: human output, `--quiet`, `--json` on a clean stdout, `--keep-alive`,
+  `--insecure`, Ctrl-C, exit codes, argument validation, `python -m netmeter`.
 
-CI runs the same on Python 3.11, 3.12 and 3.13.
+CI runs the same on Python 3.10 through 3.14.
 
 ## Design decisions
 
@@ -267,7 +290,7 @@ CI runs the same on Python 3.11, 3.12 and 3.13.
    failed request instead, and reports it.
 6. **Request time = from sending the request to the last body byte.** That is
    the only interval the client can observe end to end and the one users
-   experience. Time to first byte is kept separately for those who want to
+   experience. Time to headers is kept separately for those who want to
    split it.
 7. **New connection per request by default.** Explained in *Fresh connection
    vs keep-alive*.
@@ -290,5 +313,7 @@ src/netmeter/
   stats.py               pure arithmetic: summary and unit conversions
   models.py              RequestResult / RequestFailure / Summary dataclasses
   cli.py                 argument parsing and output formatting
+  __main__.py            makes `python -m netmeter` work
 tests/                   pytest suite with a local HTTP/HTTPS server
+.github/workflows/       ruff + pytest on every push
 ```

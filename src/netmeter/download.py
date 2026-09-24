@@ -11,7 +11,7 @@ import http.client
 import socket
 import ssl
 from time import perf_counter
-from urllib.parse import SplitResult, urljoin, urlsplit
+from urllib.parse import SplitResult, quote, urljoin, urlsplit
 
 from netmeter.models import RequestResult
 
@@ -20,6 +20,10 @@ DEFAULT_CHUNK_SIZE = 64 * 1024
 MAX_REDIRECTS = 10
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 USER_AGENT = "netmeter/0.1 (+https://github.com/AsmodaiP/internet-speed-test)"
+
+# Characters that may appear unescaped in a request target (RFC 3986 pchar
+# plus "/" and "?"). "%" is kept so already-encoded URLs are sent unchanged.
+_TARGET_SAFE = "/?%:@!$&'()*+,;=~-._"
 
 ConnectionKey = tuple[str, str, int]
 
@@ -54,6 +58,7 @@ class Downloader:
         self._verify_tls = verify_tls
         self._chunk_size = chunk_size
         self._connections: dict[ConnectionKey, http.client.HTTPConnection] = {}
+        self._ssl_context: ssl.SSLContext | None = None
 
     def __enter__(self) -> Downloader:
         return self
@@ -68,32 +73,43 @@ class Downloader:
         self._connections.clear()
 
     def download(self, url: str, *, index: int = 0) -> RequestResult:
-        """GET ``url``, read the whole body and return timing and size."""
+        """GET ``url``, read the whole body and return timing and size.
+
+        Raises :class:`DownloadError` on any failure, including a body that is
+        shorter than the announced ``Content-Length``.
+        """
         started = perf_counter()
         try:
             response, final_url = self._open(url)
-            time_to_first_byte = perf_counter() - started
+            time_to_headers = perf_counter() - started
             received = 0
             while chunk := response.read(self._chunk_size):
                 received += len(chunk)
             duration = perf_counter() - started
+
+            content_length = _content_length(response)
+            if content_length is not None and received != content_length:
+                raise DownloadError(
+                    f"server closed the connection after {received} of {content_length} bytes"
+                )
+            return RequestResult(
+                index=index,
+                duration=duration,
+                downloaded_bytes=received,
+                time_to_headers=time_to_headers,
+                status=response.status,
+                content_length=content_length,
+                final_url=final_url,
+            )
         except DownloadError:
+            self.close()  # whatever went wrong, do not reuse a connection in unknown state
             raise
-        except (OSError, http.client.HTTPException) as exc:
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            self.close()
             raise DownloadError(self._describe(exc)) from exc
         finally:
             if not self._keep_alive:
                 self.close()
-
-        return RequestResult(
-            index=index,
-            duration=duration,
-            downloaded_bytes=received,
-            time_to_first_byte=time_to_first_byte,
-            status=response.status,
-            content_length=_content_length(response),
-            final_url=final_url,
-        )
 
     # -- internals ---------------------------------------------------------
 
@@ -112,11 +128,10 @@ class Downloader:
                     raise DownloadError(
                         f"HTTP {response.status} redirect without a Location header"
                     )
-                current = urljoin(current, location)
+                current = urljoin(current, _decode_header(location))
                 continue
 
             if not 200 <= response.status < 300:
-                self._drop(key)
                 raise DownloadError(f"HTTP {response.status} {response.reason}".rstrip())
 
             return response, current
@@ -144,8 +159,11 @@ class Downloader:
         scheme, host, port = key
         conn: http.client.HTTPConnection
         if scheme == "https":
-            context = _ssl_context(verify=self._verify_tls)
-            conn = http.client.HTTPSConnection(host, port, timeout=self._timeout, context=context)
+            if self._ssl_context is None:  # built once: loading a CA bundle is not free
+                self._ssl_context = _ssl_context(verify=self._verify_tls)
+            conn = http.client.HTTPSConnection(
+                host, port, timeout=self._timeout, context=self._ssl_context
+            )
         else:
             conn = http.client.HTTPConnection(host, port, timeout=self._timeout)
         self._connections[key] = conn
@@ -170,7 +188,9 @@ class Downloader:
         if isinstance(exc, http.client.RemoteDisconnected):
             return "server closed the connection before sending a response"
         if isinstance(exc, http.client.IncompleteRead):
-            return f"server closed the connection mid-body ({len(exc.partial)} bytes received)"
+            return "server closed the connection in the middle of a chunked body"
+        if isinstance(exc, UnicodeError):
+            return f"URL cannot be encoded for the wire: {exc}"
         return f"{type(exc).__name__}: {exc}"
 
 
@@ -205,10 +225,19 @@ def _connection_key(parts: SplitResult) -> ConnectionKey:
 
 
 def _request_target(parts: SplitResult) -> str:
-    target = parts.path or "/"
+    """Path and query, percent-encoded so non-ASCII (e.g. pasted Wikipedia links) work."""
+    target = quote(parts.path or "/", safe=_TARGET_SAFE)
     if parts.query:
-        target += "?" + parts.query
+        target += "?" + quote(parts.query, safe=_TARGET_SAFE)
     return target
+
+
+def _decode_header(value: str) -> str:
+    """Undo http.client's latin-1 decoding for servers that send UTF-8 in headers."""
+    try:
+        return value.encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        return value
 
 
 def _content_length(response: http.client.HTTPResponse) -> int | None:

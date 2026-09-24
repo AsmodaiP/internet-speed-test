@@ -13,13 +13,15 @@ class RequestResult:
     started until the last byte of the body arrived. On a fresh connection it
     therefore includes DNS resolution, TCP connect, the TLS handshake, server
     processing time and the transfer itself: everything a client has to wait
-    for to obtain the resource.
+    for to obtain the resource. ``time_to_headers`` is the part of it spent
+    before the response headers (of the final response, after redirects) had
+    been received.
     """
 
     index: int
     duration: float
     downloaded_bytes: int
-    time_to_first_byte: float
+    time_to_headers: float
     status: int
     content_length: int | None
     final_url: str
@@ -28,11 +30,6 @@ class RequestResult:
     def bytes_per_second(self) -> float:
         """Throughput of this single request."""
         return self.downloaded_bytes / self.duration if self.duration > 0 else 0.0
-
-    @property
-    def content_length_mismatch(self) -> bool:
-        """True when the server announced a size that differs from what arrived."""
-        return self.content_length is not None and self.content_length != self.downloaded_bytes
 
 
 @dataclass(frozen=True, slots=True)

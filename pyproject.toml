@@ -7,7 +7,7 @@ name = "netmeter"
 version = "0.1.0"
 description = "Measure download speed from your machine with sequential HTTP requests"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Dmitriy Pereguda" }]
 dependencies = []
@@ -23,7 +23,7 @@ packages = ["src/netmeter"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

@@ -9,7 +9,7 @@ def result(index: int, duration: float, nbytes: int) -> RequestResult:
         index=index,
         duration=duration,
         downloaded_bytes=nbytes,
-        time_to_first_byte=duration / 10,
+        time_to_headers=duration / 10,
         status=200,
         content_length=nbytes,
         final_url="http://example/file",

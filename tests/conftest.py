@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -48,6 +49,7 @@ class Handler(BaseHTTPRequestHandler):
         with state.lock:
             state.hits += 1
             hit = state.hits
+            state.records.append(record)  # visible before any byte reaches the client
 
         parts = urlsplit(self.path)
         query = {k: v[0] for k, v in parse_qs(parts.query).items()}
@@ -57,12 +59,20 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(float(query.get("delay", 0)))
             self._send_body(b"x" * int(query.get("size", 1000)))
         elif route == "/chunked":
+            self._send_chunked(b"a" * 300, b"b" * 200, terminate=True)
+        elif route == "/chunked-truncated":
+            # One chunk, then hang up without the terminating 0-chunk.
+            self._send_chunked(b"a" * 300, terminate=False)
+            self.close_connection = True
+        elif route == "/slow":
+            # 1000 bytes in 10 pieces with a pause between them: slow but never idle.
             self.send_response(200)
-            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Content-Length", "1000")
             self.end_headers()
-            for piece in (b"a" * 300, b"b" * 200):
-                self.wfile.write(f"{len(piece):x}\r\n".encode() + piece + b"\r\n")
-            self.wfile.write(b"0\r\n\r\n")
+            for _ in range(10):
+                self.wfile.write(b"s" * 100)
+                self.wfile.flush()
+                time.sleep(float(query.get("interval", 0.05)))
         elif route == "/redirect":
             self._redirect("/file?size=500")
         elif route == "/redirect-loop":
@@ -91,8 +101,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_body(b"not found", status=404)
 
         record.finished = perf_counter()
-        with state.lock:
-            state.records.append(record)
 
     def _send_body(self, body: bytes, status: int = 200) -> None:
         self.send_response(status)
@@ -100,6 +108,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_chunked(self, *pieces: bytes, terminate: bool) -> None:
+        self.send_response(200)
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for piece in pieces:
+            self.wfile.write(f"{len(piece):x}\r\n".encode() + piece + b"\r\n")
+        if terminate:
+            self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
 
     def _redirect(self, location: str) -> None:
         self.send_response(302)
@@ -120,7 +138,10 @@ class LocalServer(ThreadingHTTPServer):
         self.state = ServerState()
 
     def handle_error(self, request: Any, client_address: Any) -> None:
-        pass  # a client that timed out and left is expected in some tests
+        # A client that timed out and left is expected in some tests; anything
+        # else is a bug in a route and should be visible.
+        if not isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            super().handle_error(request, client_address)
 
     def url(self, path: str) -> str:
         host, port = self.server_address[:2]

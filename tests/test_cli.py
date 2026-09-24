@@ -1,8 +1,11 @@
 import json
+import subprocess
+import sys
 
 import pytest
 
-from netmeter.cli import main
+from netmeter.cli import EXIT_INTERRUPTED, main
+from netmeter.models import RequestResult
 
 
 def test_help_and_version(capsys) -> None:
@@ -67,14 +70,55 @@ def test_total_failure(server, capsys) -> None:
     assert "No successful requests" in captured.err
 
 
-def test_content_length_mismatch_warning(server, capsys) -> None:
-    main([server.url("/truncated"), "-n", "1"])
-    assert "warning: request 1 received 400 bytes" in capsys.readouterr().err
+def test_truncated_body_is_reported_as_failure(server, capsys) -> None:
+    code = main([server.url("/truncated"), "-n", "1"])
+    assert code == 1
+    assert "FAILED" in capsys.readouterr().out
+
+
+def test_json_report_with_no_successes_has_null_summary(server, capsys) -> None:
+    code = main([server.url("/status/500"), "-n", "3", "--json", "--quiet"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert report["summary"] is None
+    assert [r["ok"] for r in report["requests"]] == [False]  # first failure aborts
+
+
+def test_keep_alive_flag(server, capsys) -> None:
+    assert main([server.url("/file"), "-n", "2", "--keep-alive"]) == 0
+    assert "reusing one connection" in capsys.readouterr().out
+    assert len({r.client_port for r in server.records}) == 1
+
+
+def test_ctrl_c_summarizes_partial_run_and_exits_130(monkeypatch, capsys) -> None:
+    def fake_measure(url, **kwargs):
+        yield RequestResult(1, 0.5, 1000, 0.1, 200, 1000, url)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("netmeter.cli.measure", fake_measure)
+    code = main(["http://example.invalid/file", "-n", "5"])
+    captured = capsys.readouterr()
+    assert code == EXIT_INTERRUPTED == 130
+    assert "Interrupted" in captured.err
+    assert "Requests:       1/1 successful" in captured.out
+
+
+def test_python_dash_m_entry_point() -> None:
+    proc = subprocess.run(
+        [sys.executable, "-m", "netmeter", "--version"], capture_output=True, text=True, check=True
+    )
+    assert proc.stdout.strip() == "netmeter 0.1.0"
 
 
 @pytest.mark.parametrize(
     "argv",
-    [["example.com/file"], ["http://x/", "-n", "0"], ["http://x/", "--timeout", "-1"]],
+    [
+        ["example.com/file"],
+        ["ftp://example.com/file"],
+        ["http://x/", "-n", "0"],
+        ["http://x/", "--timeout", "-1"],
+        ["http://x/", "--timeout", "nan"],
+    ],
 )
 def test_invalid_arguments(argv: list[str]) -> None:
     with pytest.raises(SystemExit) as exc:

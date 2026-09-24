@@ -51,7 +51,7 @@ def run(
     keep_alive: bool = False,
     verify_tls: bool = True,
 ) -> list[RequestResult | RequestFailure]:
-    """Run all requests and return their outcomes."""
+    """Run all requests and return their outcomes. Same failure policy as :func:`measure`."""
     return list(
         measure(url, count=count, timeout=timeout, keep_alive=keep_alive, verify_tls=verify_tls)
     )
