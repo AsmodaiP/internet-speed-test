@@ -1,6 +1,8 @@
 import json
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -103,10 +105,21 @@ def test_ctrl_c_summarizes_partial_run_and_exits_130(monkeypatch, capsys) -> Non
     assert "Requests:       1/1 successful" in captured.out
 
 
-def test_python_dash_m_entry_point() -> None:
-    proc = subprocess.run(
-        [sys.executable, "-m", "netmeter", "--version"], capture_output=True, text=True, check=True
-    )
+REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        [sys.executable, "-m", "netmeter", "--version"],
+        [sys.executable, str(REPO / "src" / "netmeter" / "cli.py"), "--version"],
+    ],
+    ids=["python -m netmeter", "python src/netmeter/cli.py"],
+)
+def test_entry_points_without_installing(command: list[str]) -> None:
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env["PYTHONPATH"] = str(REPO / "src")
+    proc = subprocess.run(command, capture_output=True, text=True, check=True, env=env)
     assert proc.stdout.strip() == "netmeter 0.1.0"
 
 

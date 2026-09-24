@@ -9,6 +9,8 @@ Usage:
 """
 
 import http.client
+import os
+import ssl
 import sys
 import time
 import urllib.request
@@ -18,14 +20,35 @@ TIMEOUT = 30  # seconds without data before giving up
 CHUNK = 64 * 1024  # read the body piece by piece, never whole in memory
 
 
-def download(url: str) -> tuple[float, int]:
+def ssl_context() -> ssl.SSLContext:
+    """Default TLS settings, plus a CA bundle for Pythons that ship without one.
+
+    The python.org installer for macOS is the usual case: its OpenSSL has no
+    certificates, so every https:// request fails. Use certifi if it is
+    installed, otherwise the operating system's bundle.
+    """
+    context = ssl.create_default_context()
+    if context.cert_store_stats()["x509_ca"] == 0:
+        try:
+            import certifi
+
+            context.load_verify_locations(certifi.where())
+        except ImportError:
+            for bundle in ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"):
+                if os.path.exists(bundle):
+                    context.load_verify_locations(bundle)
+                    break
+    return context
+
+
+def download(url: str, context: ssl.SSLContext) -> tuple[float, int]:
     """Return (seconds from request start to last body byte, bytes received)."""
     # identity: count bytes as they travel on the wire, not after decompression.
     # A real User-Agent: some CDNs (e.g. Wikimedia) reject Python's default one.
     headers = {"Accept-Encoding": "identity", "User-Agent": "netmeter-minimal/0.1"}
     request = urllib.request.Request(url, headers=headers)
     started = time.perf_counter()
-    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+    with urllib.request.urlopen(request, timeout=TIMEOUT, context=context) as response:
         received = 0
         while chunk := response.read(CHUNK):
             received += len(chunk)
@@ -37,12 +60,20 @@ def main() -> None:
         sys.exit(f"usage: {sys.argv[0]} URL")
     url = sys.argv[1]
 
+    context = ssl_context()
     durations: list[float] = []
     total_bytes = 0
     for i in range(1, REQUESTS + 1):  # strictly one after another
         try:
-            elapsed, received = download(url)
+            elapsed, received = download(url, context)
         except (OSError, http.client.HTTPException, ValueError) as exc:
+            if "CERTIFICATE_VERIFY_FAILED" in str(exc):
+                sys.exit(
+                    f"request {i} failed: {exc}\n"
+                    "Your Python cannot verify TLS certificates. On macOS with the python.org "
+                    "installer, run 'Install Certificates.command' from the Python folder, "
+                    "or 'pip install certifi'."
+                )
             sys.exit(f"request {i} failed: {exc}")
         durations.append(elapsed)
         total_bytes += received

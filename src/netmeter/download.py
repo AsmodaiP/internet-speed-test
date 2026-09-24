@@ -8,6 +8,7 @@ one, because that choice changes what a measurement means.
 from __future__ import annotations
 
 import http.client
+import os
 import socket
 import ssl
 from time import perf_counter
@@ -194,19 +195,29 @@ class Downloader:
         return f"{type(exc).__name__}: {exc}"
 
 
+# Where operating systems keep their CA bundle, for Pythons that have none.
+_SYSTEM_CA_BUNDLES = ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt")
+
+
 def _ssl_context(*, verify: bool) -> ssl.SSLContext:
     context = ssl.create_default_context()
     if not verify:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         return context
-    # Some Python builds (notably the python.org installer on macOS) ship
-    # without a CA bundle. If certifi happens to be installed, use it too.
+    if context.cert_store_stats()["x509_ca"] > 0:
+        return context
+    # No CA bundle at all: the python.org installer on macOS ships like this.
+    # Fall back to certifi if installed, otherwise to the OS bundle.
     try:
         import certifi
     except ImportError:
-        return context
-    context.load_verify_locations(certifi.where())
+        for bundle in _SYSTEM_CA_BUNDLES:
+            if os.path.exists(bundle):
+                context.load_verify_locations(bundle)
+                break
+    else:
+        context.load_verify_locations(certifi.where())
     return context
 
 

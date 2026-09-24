@@ -44,7 +44,7 @@ python3 examples/minimal.py "https://speed.cloudflare.com/__down?bytes=25000000"
 Full CLI, still nothing to install:
 
 ```bash
-PYTHONPATH=src python3 -m netmeter "https://speed.cloudflare.com/__down?bytes=25000000"
+python3 src/netmeter/cli.py "https://speed.cloudflare.com/__down?bytes=25000000"
 ```
 
 Or install it (with [uv](https://docs.astral.sh/uv/) or plain pip) to get the
@@ -61,12 +61,13 @@ are known to be fine with repeated downloads:
 - `https://speed.cloudflare.com/__down?bytes=25000000` (25 MB of zeros; change the number for any size)
 - `https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg` (14.7 MB JPEG; Wikimedia rate-limits after a few dozen downloads)
 
-> **macOS note.** If the first request fails with
-> `CERTIFICATE_VERIFY_FAILED` / `unable to get local issuer certificate`, your
-> Python has no CA bundle. That is the python.org installer's default; run
-> `Install Certificates.command` from its folder once, or use a Homebrew
-> Python. The `netmeter` CLI also accepts `--insecure` and picks up `certifi`
-> if it is installed; the minimal script deliberately has neither.
+> **macOS note.** The python.org installer ships a Python with no CA
+> certificates, so plain `urllib` fails on every `https://` URL with
+> `CERTIFICATE_VERIFY_FAILED`. Both scripts here detect that and fall back to
+> `certifi` if it is installed, otherwise to the system bundle in
+> `/etc/ssl/cert.pem`. If you still see the error, run
+> `Install Certificates.command` from the Python folder once. The `netmeter`
+> CLI additionally accepts `--insecure`.
 
 ## Example output
 
@@ -175,7 +176,8 @@ Exit code is 0 when every request succeeded, 1 when any failed, 2 for invalid
 arguments (bad URL, `-n 0`, negative timeout), 130 on Ctrl-C (a summary of the
 requests completed so far is still printed).
 
-`python -m netmeter` behaves the same as `netmeter`.
+`python -m netmeter` and `python src/netmeter/cli.py` behave the same as
+`netmeter`, without installing anything.
 
 ## Error handling
 
@@ -199,10 +201,9 @@ requests completed so far is still printed).
   again on a new one, because nothing had been transferred yet. That is how
   every pooled HTTP client behaves.
 - TLS: if you see `TLS certificate verification failed: unable to get local
-  issuer certificate`, your Python has no CA bundle. This is common with the
-  python.org installer on macOS (run `Install Certificates.command` from the
-  Python folder, or `pip install certifi`, which netmeter picks up
-  automatically). `--insecure` skips verification if you just want the number.
+  issuer certificate`, your Python has no CA bundle and neither `certifi` nor
+  a system bundle could be found (see the macOS note under *Quick start*).
+  `--insecure` skips verification if you just want the number.
   A different message (`self-signed certificate`, `hostname mismatch`) means
   the server's certificate is the problem, not your Python.
 - Some CDNs reject Python's default `User-Agent` (Wikimedia answers 403), and
